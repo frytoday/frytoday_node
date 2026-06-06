@@ -5,6 +5,7 @@ import QRCode from 'qrcode';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import https from 'https';
 import makeWASocket, {
     DisconnectReason,
     useMultiFileAuthState,
@@ -49,27 +50,58 @@ dotenv.config();
 
 const PHP_API_BASE = process.env.PHP_API_BASE || 'https://frytoday.zerame.com/api';
 const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY || '';
+// The PHP server currently uses a self-signed SSL certificate, which Node rejects.
+// Set ALLOW_INSECURE_TLS=true on Railway to accept it (ONLY this call is affected).
+// Once a valid/trusted certificate is installed, remove this env var.
+const ALLOW_INSECURE_TLS = process.env.ALLOW_INSECURE_TLS === 'true';
+
+// Minimal HTTPS POST helper so we can control certificate validation per-request
+// (the global fetch() can't accept a self-signed cert without weakening TLS app-wide).
+function postJson(urlString, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlString);
+        const payload = JSON.stringify(body);
+        const req = https.request(
+            {
+                hostname: url.hostname,
+                port: url.port || 443,
+                path: url.pathname + url.search,
+                method: 'POST',
+                rejectUnauthorized: !ALLOW_INSECURE_TLS,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload),
+                    ...headers
+                }
+            },
+            (res) => {
+                let data = '';
+                res.on('data', (chunk) => (data += chunk));
+                res.on('end', () => resolve({ status: res.statusCode, body: data }));
+            }
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+    });
+}
 
 async function fetchContacts(labelIds) {
-    const resp = await fetch(`${PHP_API_BASE}/whatsapp_contacts.php`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Api-Key': WHATSAPP_API_KEY
-        },
-        body: JSON.stringify({ labelIds })
-    });
+    const { status, body } = await postJson(
+        `${PHP_API_BASE}/whatsapp_contacts.php`,
+        { labelIds },
+        { 'X-Api-Key': WHATSAPP_API_KEY }
+    );
 
-    const text = await resp.text();
     let data;
     try {
-        data = JSON.parse(text);
+        data = JSON.parse(body);
     } catch {
-        throw new Error(`Contacts API returned non-JSON (${resp.status}): ${text.slice(0, 200)}`);
+        throw new Error(`Contacts API returned non-JSON (${status}): ${body.slice(0, 200)}`);
     }
 
-    if (!resp.ok || !data.success) {
-        throw new Error(data.message || `Contacts API failed (${resp.status})`);
+    if (status < 200 || status >= 300 || !data.success) {
+        throw new Error(data.message || `Contacts API failed (${status})`);
     }
 
     return data.contacts || [];
