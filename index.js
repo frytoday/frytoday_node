@@ -42,11 +42,24 @@ app.use((req, res, next) => {
 app.use(bodyParser.json({ limit: '50mb' }));
 
 // ================= DATABASE CONNECTION =================
+// const db = await mysql.createPool({
+//     host: 'localhost',
+//     user: 'frytoday',
+//     password: 'dwOVz&1jES',
+//     database: 'frytoday'
+// });
+// ================= DATABASE CONNECTION =================
+import dotenv from 'dotenv';
+dotenv.config();
+
 const db = await mysql.createPool({
-    host: 'localhost',
-    user: 'root',
-    password: '',
-    database: 'frytoday'
+    host: process.env.DB_HOST,
+    port: parseInt(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10
 });
 
 // ================= WHATSAPP CONNECTION =================
@@ -266,37 +279,6 @@ app.post('/send-whatsapp', async (req, res) => {
         return res.status(500).json({ success: false, message: error.message });
     }
 });
-
-// app.post('/send-whatsapp', async (req, res) => {
-//     if (!sock?.user) {
-//         return res.status(400).json({ success: false, message: 'WhatsApp not connected' });
-//     }
-
-//     const { labelIds, content, attachments } = req.body;
-
-//     // ---- validation (same as before) ----
-//     if (!Array.isArray(labelIds) || !labelIds.length) {
-//         return res.status(400).json({ success: false, message: 'labelIds required' });
-//     }
-//     if (!content) {
-//         return res.status(400).json({ success: false, message: 'content required' });
-//     }
-
-//     const ids = labelIds.map(id => parseInt(id)).join(',');
-//     const [rows] = await db.query(`
-//         SELECT phoneNumber, fullName, Desigination 
-//         FROM tbl_employee 
-//         WHERE Desigination IN (${ids}) AND phoneNumber IS NOT NULL
-//     `);
-
-//     if (!rows?.length) {
-//         return res.status(404).json({ success: false, message: 'No contacts found' });
-//     }
-
-//     await sendBulkMessages(sock, rows, content, attachments);
-
-//     res.json({ success: true, count: rows.length });
-// });
 
 // ================= START SERVER =================
 const PORT = 3000;
