@@ -107,6 +107,39 @@ async function fetchContacts(labelIds) {
     return data.contacts || [];
 }
 
+// Download a file (e.g. an attachment image) into a Buffer. Honours the same
+// self-signed-cert setting and follows one level of redirect.
+function downloadBuffer(urlString, redirects = 0) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlString);
+        const req = https.request(
+            {
+                hostname: url.hostname,
+                port: url.port || 443,
+                path: url.pathname + url.search,
+                method: 'GET',
+                rejectUnauthorized: !ALLOW_INSECURE_TLS
+            },
+            (res) => {
+                // Follow a redirect (max 3)
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 3) {
+                    res.resume();
+                    return downloadBuffer(new URL(res.headers.location, url).toString(), redirects + 1).then(resolve, reject);
+                }
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    return reject(new Error(`Download failed (${res.statusCode}) for ${urlString}`));
+                }
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => resolve(Buffer.concat(chunks)));
+            }
+        );
+        req.on('error', reject);
+        req.end();
+    });
+}
+
 // ================= WHATSAPP CONNECTION =================
 let sock;
 let currentQR = null; // 🔹 store QR temporarily
@@ -237,27 +270,53 @@ async function sendBulkMessages(sock, contacts, text, attachments = []) {
                 console.log(`Text → ${c.phoneNumber}`);
             }
 
-            // ───── 2. TEXT + IMAGE(S) → caption ─────
+            // ───── 2. TEXT + FILE(S) → caption ─────
             else {
                 for (const f of files) {
-                    const { fileName, imageType, imageData } = f;
+                    const fileName = f.fileName || 'file';
+                    // Extension comes from the file name (template attachments are URLs),
+                    // falling back to a provided imageType for legacy base64 payloads.
+                    const ext = ((fileName.split('.').pop() || f.imageType || '').toLowerCase()).replace(/[^a-z0-9]/g, '');
 
-                    // Strip data-uri prefix
-                    const base64 = imageData.replace(/^data:.*;base64,/, '');
-                    const buffer = Buffer.from(base64, 'base64');
+                    // Get the file bytes: from a URL (template attachments) or base64 (legacy)
+                    let buffer;
+                    if (f.url) {
+                        buffer = await downloadBuffer(f.url);
+                    } else if (f.imageData) {
+                        buffer = Buffer.from(f.imageData.replace(/^data:.*;base64,/, ''), 'base64');
+                    } else {
+                        console.warn(`Attachment for ${c.phoneNumber} has no url/imageData, skipping`);
+                        continue;
+                    }
 
-                    const ext = imageType.toLowerCase();
-                    const safeName = fileName || `file.${ext}`;
+                    const imageExts = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+                    const videoExts = ['mp4', '3gp', 'mov'];
 
-                    const payload = {
-                        image: buffer,
-                        mimetype: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
-                        fileName: safeName,
-                        caption: greeting               // <-- TEXT becomes caption
-                    };
+                    let payload;
+                    if (imageExts.includes(ext)) {
+                        payload = {
+                            image: buffer,
+                            mimetype: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+                            caption: greeting               // <-- TEXT becomes caption
+                        };
+                    } else if (videoExts.includes(ext)) {
+                        payload = {
+                            video: buffer,
+                            mimetype: 'video/mp4',
+                            caption: greeting
+                        };
+                    } else {
+                        // pdf / docs / anything else → send as a document
+                        payload = {
+                            document: buffer,
+                            mimetype: ext === 'pdf' ? 'application/pdf' : 'application/octet-stream',
+                            fileName,
+                            caption: greeting
+                        };
+                    }
 
                     await sock.sendMessage(jid, payload);
-                    console.log(`Image (caption) → ${c.phoneNumber} – ${safeName}`);
+                    console.log(`File (caption) → ${c.phoneNumber} – ${fileName}`);
                 }
             }
 
