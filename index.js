@@ -1,6 +1,5 @@
 import express from 'express';
 import bodyParser from 'body-parser';
-import mysql from 'mysql2/promise';
 import qrcode from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import cors from 'cors';
@@ -41,26 +40,40 @@ app.use((req, res, next) => {
 
 app.use(bodyParser.json({ limit: '50mb' }));
 
-// ================= DATABASE CONNECTION =================
-// const db = await mysql.createPool({
-//     host: 'localhost',
-//     user: 'frytoday',
-//     password: 'dwOVz&1jES',
-//     database: 'frytoday'
-// });
-// ================= DATABASE CONNECTION =================
+// ================= CONTACTS API (PHP backend) =================
+// The PHP backend runs on the same server as MySQL and reaches it via localhost.
+// Railway cannot connect to MySQL directly (host firewall blocks port 3306), so
+// we fetch contacts over HTTPS from the PHP endpoint instead.
 import dotenv from 'dotenv';
 dotenv.config();
 
-const db = await mysql.createPool({
-    host: process.env.DB_HOST,
-    port: parseInt(process.env.DB_PORT) || 3306,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASS,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10
-});
+const PHP_API_BASE = process.env.PHP_API_BASE || 'https://frytoday.zerame.com/api';
+const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY || '';
+
+async function fetchContacts(labelIds) {
+    const resp = await fetch(`${PHP_API_BASE}/whatsapp_contacts.php`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Api-Key': WHATSAPP_API_KEY
+        },
+        body: JSON.stringify({ labelIds })
+    });
+
+    const text = await resp.text();
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch {
+        throw new Error(`Contacts API returned non-JSON (${resp.status}): ${text.slice(0, 200)}`);
+    }
+
+    if (!resp.ok || !data.success) {
+        throw new Error(data.message || `Contacts API failed (${resp.status})`);
+    }
+
+    return data.contacts || [];
+}
 
 // ================= WHATSAPP CONNECTION =================
 let sock;
@@ -243,12 +256,7 @@ app.post('/send-whatsapp', async (req, res) => {
             return res.status(400).json({ success: false, message: 'content required' });
         }
 
-        const ids = labelIds.map(id => parseInt(id)).join(',');
-        const [rows] = await db.query(`
-            SELECT phoneNumber, fullName, Desigination 
-            FROM tbl_employee 
-            WHERE Desigination IN (${ids}) AND phoneNumber IS NOT NULL
-        `);
+        const rows = await fetchContacts(labelIds);
 
         if (!rows?.length) {
             return res.status(404).json({ success: false, message: 'No contacts found' });
