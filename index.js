@@ -86,10 +86,12 @@ function postJson(urlString, body, headers = {}) {
     });
 }
 
-async function fetchContacts(labelIds) {
+// Fetch employees for the given designations who have NOT already been sent
+// this title. Each contact = { employeeId, phoneNumber, fullName }.
+async function fetchContacts(labelIds, titleId) {
     const { status, body } = await postJson(
         `${PHP_API_BASE}/whatsapp_contacts.php`,
-        { labelIds },
+        { labelIds, titleId },
         { 'X-Api-Key': WHATSAPP_API_KEY }
     );
 
@@ -105,6 +107,26 @@ async function fetchContacts(labelIds) {
     }
 
     return data.contacts || [];
+}
+
+// Record the employees we just sent this title to, so they're skipped next time.
+// Best-effort: failures are logged but don't fail the send.
+async function markSent(titleId, employeeIds) {
+    if (!employeeIds.length) return;
+    try {
+        const { status, body } = await postJson(
+            `${PHP_API_BASE}/whatsapp_mark_sent.php`,
+            { titleId, employeeIds },
+            { 'X-Api-Key': WHATSAPP_API_KEY }
+        );
+        let data;
+        try { data = JSON.parse(body); } catch { data = null; }
+        if (status < 200 || status >= 300 || !data?.success) {
+            console.error(`⚠️ markSent failed (${status}): ${(data && data.message) || body.slice(0, 200)}`);
+        }
+    } catch (e) {
+        console.error('⚠️ markSent error:', e.message);
+    }
 }
 
 // Download a file (e.g. an attachment image) into a Buffer. Honours the same
@@ -257,6 +279,8 @@ async function sendBulkMessages(sock, contacts, text, attachments = []) {
     // Normalise attachments → always an array
     const files = Array.isArray(attachments) ? attachments : (attachments ? [attachments] : []);
 
+    const sentEmployeeIds = []; // employees we successfully delivered to
+
     for (const c of contacts) {
         const jid = `91${c.phoneNumber}@s.whatsapp.net`;
         // const greeting = `Dear ${c.fullName},\n\n${text}\n\nBest regards,\nFryToday`;
@@ -320,6 +344,9 @@ async function sendBulkMessages(sock, contacts, text, attachments = []) {
                 }
             }
 
+            // Delivered without throwing → remember this employee as sent
+            if (c.employeeId) sentEmployeeIds.push(c.employeeId);
+
             // Respect WhatsApp rate limits
             await new Promise(r => setTimeout(r, 3000));   // 3 sec between contacts
         } catch (e) {
@@ -328,6 +355,7 @@ async function sendBulkMessages(sock, contacts, text, attachments = []) {
     }
 
     console.log('All done!');
+    return sentEmployeeIds;
 }
 
 const BATCH_LIMIT = 2;
@@ -338,39 +366,46 @@ app.post('/send-whatsapp', async (req, res) => {
             return res.status(400).json({ success: false, message: 'WhatsApp not connected' });
         }
 
-        const { labelIds, content, attachments, startIndex = 0 } = req.body;
+        const { labelIds, titleId, content, attachments } = req.body;
 
         if (!Array.isArray(labelIds) || !labelIds.length) {
             return res.status(400).json({ success: false, message: 'labelIds required' });
+        }
+        if (!titleId) {
+            return res.status(400).json({ success: false, message: 'titleId required' });
         }
         if (!content) {
             return res.status(400).json({ success: false, message: 'content required' });
         }
 
-        const rows = await fetchContacts(labelIds);
+        // Only employees who have NOT already been sent this title
+        const pending = await fetchContacts(labelIds, titleId);
 
-        if (!rows?.length) {
-            return res.status(404).json({ success: false, message: 'No contacts found' });
+        if (!pending.length) {
+            return res.json({
+                success: true,
+                message: 'Everyone in the selected designation has already received this title.',
+                sentCount: 0,
+                remaining: 0
+            });
         }
 
-        // 🔹 Split contacts into batches
-        const total = rows.length;
-        const start = parseInt(startIndex) || 0;
-        const end = Math.min(start + BATCH_LIMIT, total);
-        const batch = rows.slice(start, end);
+        // Send up to BATCH_LIMIT of the not-yet-sent people this round
+        const batch = pending.slice(0, BATCH_LIMIT);
+        console.log(`📦 Sending to ${batch.length} new contact(s); ${pending.length} pending for title ${titleId}`);
 
-        console.log(`📦 Sending batch ${start + 1}-${end} of ${total}`);
+        const sentEmployeeIds = await sendBulkMessages(sock, batch, content, attachments);
 
-        await sendBulkMessages(sock, batch, content, attachments);
+        // Record who was sent so they're skipped next time
+        await markSent(titleId, sentEmployeeIds);
 
-        const remaining = total - end;
+        const remaining = pending.length - sentEmployeeIds.length;
 
         return res.json({
             success: true,
-            message: `✅ Sent ${batch.length} messages successfully.`,
-            sentCount: batch.length,
-            remaining,
-            nextStartIndex: remaining > 0 ? end : null
+            message: `✅ Sent ${sentEmployeeIds.length} new message(s).`,
+            sentCount: sentEmployeeIds.length,
+            remaining
         });
 
     } catch (error) {
