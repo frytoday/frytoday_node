@@ -358,7 +358,9 @@ async function sendBulkMessages(sock, contacts, text, attachments = []) {
     return sentEmployeeIds;
 }
 
-const BATCH_LIMIT = 2;
+// Max people to send per request. 0 (default) = send EVERYONE not-yet-sent in
+// one go. Set a number on Railway (e.g. BATCH_LIMIT=20) to cap it if needed.
+const BATCH_LIMIT = parseInt(process.env.BATCH_LIMIT) || 0;
 
 app.post('/send-whatsapp', async (req, res) => {
     try {
@@ -390,9 +392,9 @@ app.post('/send-whatsapp', async (req, res) => {
             });
         }
 
-        // Send up to BATCH_LIMIT of the not-yet-sent people this round
-        const batch = pending.slice(0, BATCH_LIMIT);
-        console.log(`📦 Sending to ${batch.length} new contact(s); ${pending.length} pending for title ${titleId}`);
+        // Send to all not-yet-sent people (or up to BATCH_LIMIT if configured)
+        const batch = BATCH_LIMIT > 0 ? pending.slice(0, BATCH_LIMIT) : pending;
+        console.log(`📦 Sending to ${batch.length} new contact(s) of ${pending.length} pending for title ${titleId}`);
 
         const sentEmployeeIds = await sendBulkMessages(sock, batch, content, attachments);
 
